@@ -13,7 +13,7 @@ RUN apk --no-cache add \
       cyrus-sasl-dev \
       openssl-dev \
       make \
-      python \
+      python3 \
       git
 
 RUN apk add --no-cache --virtual .build-deps gcc zlib-dev libc-dev bsd-compat-headers py-setuptools bash

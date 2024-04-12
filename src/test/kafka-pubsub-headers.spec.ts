@@ -7,7 +7,7 @@ let pubsub: KafkaPubSub
 beforeAll(() => {
   jest.setTimeout(60000);
   pubsub = new KafkaPubSub({
-    topic: process.env.KAFKA_TOPIC || 'test',
+    topics: process.env.KAFKA_TOPIC.split(',') || ['test1', 'test2'],
     host: process.env.KAFKA_HOST || 'localhost',
     port: process.env.KAFKA_PORT || '9092',
     logger: Logger.createLogger({
@@ -69,4 +69,25 @@ describe('KafkaPubSub Basic Tests', () => {
     await iter.return();
   })
 
+  test('should subscribe and publish messages correctly with _targetTopic', async (done) => {
+        
+    const inputChannel = 'test-subscribe'
+    const inputPayload = {
+      _targetTopic: 'test1',
+      id: 'subscribe-value',
+    }
+    
+    function onMessage(payload) {
+      try {
+        expect(payload).toStrictEqual(inputPayload);
+        done();
+      } catch (error) {
+        done(error);
+      }      
+    }
+    
+    const subscription = await pubsub.subscribe(inputChannel, onMessage)
+    await new Promise(r => setTimeout(r, 5000));
+    await pubsub.publish(inputChannel, inputPayload)
+  })
 })

@@ -4,9 +4,10 @@ import * as Logger from 'bunyan';
 import { createChildLogger } from './child-logger';
 import { v4 as uuidv4 } from 'uuid';
 import { EventEmitter } from 'events';
+import { Mutex } from 'async-mutex';
 
 export interface IKafkaOptions {
-  topic: string
+  topics: string[]
   host: string
   port: string
   logger?: Logger,
@@ -32,6 +33,7 @@ export class KafkaPubSub extends PubSubEngine {
   private ee: EventEmitter;
   private subscriptions: { [key: string]: [string, (...args: any[]) => void] }
   private subIdCounter: number;
+  private mutex = new Mutex();  // Create a mutex instance
 
   protected logger: Logger
 
@@ -47,9 +49,13 @@ export class KafkaPubSub extends PubSubEngine {
 
   public async publish(channel: string, payload: any): Promise<void> {    
     // only create producer if we actually publish something
-    this.producer = this.producer || await this.createProducer()
+    if (!this.producer) {
+      const release = await this.mutex.acquire();
+      this.producer = this.producer || await this.createProducer()
+      release()
+    } 
     
-    let kafkaPayload = payload
+    let { _targetTopic, ...kafkaPayload } = payload;
     if (!this.options.useHeaders) {
       kafkaPayload = {
         channel: channel,
@@ -63,7 +69,7 @@ export class KafkaPubSub extends PubSubEngine {
 
     return new Promise((resolve, reject) => {
       this.producer.produce(
-        this.options.topic, 
+        _targetTopic || channel, 
         null, 
         this.serialiseMessage(kafkaPayload), 
         this.options.keyFun ? this.options.keyFun(kafkaPayload) : null, 
@@ -71,9 +77,9 @@ export class KafkaPubSub extends PubSubEngine {
         this.options.useHeaders ? [ {channel: Buffer.from(channel)} ] : null, 
         (err) => {
           if (err) {
-            reject(err)
+        reject(err)
           } else {
-            resolve()
+        resolve()
           }
         })
     })
@@ -81,7 +87,11 @@ export class KafkaPubSub extends PubSubEngine {
 
   public async subscribe(channel: string, onMessage: (...args: any[]) => void, options?: Object): Promise<number> {
     this.logger.info("Subscribing to %s", channel)
-    this.consumer = this.consumer || await this.createConsumer(this.options.topic)
+    if (!this.consumer) {
+      const release = await this.mutex.acquire();
+      this.consumer = this.consumer || await this.createConsumer(this.options.topics)
+      release()
+    }
     const internalMessage = (...args: any[]) => {
       if (this.options.useHeaders) {
         onMessage(this.deserialiseMessage(args[0]))
@@ -160,11 +170,11 @@ export class KafkaPubSub extends PubSubEngine {
       this.logger.error(err)
     })
     return new Promise((resolve, reject) => {
-      producer.on('ready', (data, metadata) => {
-        let topics =  metadata.topics.map(topic => topic.name);
-        this.logger.info('Connected, found topics: %s', topics);
+      producer.on('ready', (_data, metadata) => {
+        let kafkaTopics =  metadata.topics.map(topic => topic.name);
+        this.logger.info('Connected, found topics: %s', kafkaTopics);
         
-        if (topics.includes(this.options.topic)) {
+        if (this.options.topics.every(topic => kafkaTopics.includes(topic))) {
           resolve(producer);
         } else {
           this.logger.error('Could not find requested topic %s', this.options.topic);
@@ -178,7 +188,7 @@ export class KafkaPubSub extends PubSubEngine {
     })     
   }
 
-  private async createConsumer(topic: string): Promise<Kafka.KafkaConsumer> {    
+  private async createConsumer(topics: string[]): Promise<Kafka.KafkaConsumer> {    
     // Create a group for each instance. The consumer will receive all messages from the topic
     const groupId = this.options.groupId || uuidv4()
 
@@ -197,7 +207,7 @@ export class KafkaPubSub extends PubSubEngine {
           this.options.topicConfig
         ));
 
-    consumer.on('data', (message) => {
+    consumer.on('data', (message: Kafka.Message) => {
       if (this.logger.debug) {
         this.logger.debug("Received %s", message.value.toString())
       }
@@ -217,7 +227,7 @@ export class KafkaPubSub extends PubSubEngine {
           this.ee.emit(parsedMessage.channel, parsedMessage.payload)      
         } else {
           // No channel abstraction, publish over the whole topic
-          this.ee.emit(topic, parsedMessage)
+          this.ee.emit(message.topic, parsedMessage)
         }
       }
 
@@ -228,17 +238,17 @@ export class KafkaPubSub extends PubSubEngine {
     });
 
     return new Promise((resolve, reject) => {
-      consumer.on('ready', (data, metadata) => {
-        let topics =  metadata.topics.map(topic => topic.name);
-        this.logger.info('Connected, found topics: %s', topics);
+      consumer.on('ready', (_data, metadata) => {
+        let kafkaTopics =  metadata.topics.map(topic => topic.name);
+        this.logger.info('Connected, found topics: %s', kafkaTopics);
         
-        if (topics.includes(topic)) {
-          this.logger.info("Subscribing to %s", topic)
-          consumer.subscribe([topic]);
+        if (topics.every(topic => kafkaTopics.includes(topic))) {
+          this.logger.info("Subscribing to %s", topics.join(','))
+          consumer.subscribe(topics);
           consumer.consume();
           resolve(consumer);
         } else {
-          this.logger.error('Could not find requested topic %s', topic);
+          this.logger.error('Could not find requested topic %s', topics.join(','));
           consumer.disconnect()
           reject('Could not find requested topic %s')
         }
