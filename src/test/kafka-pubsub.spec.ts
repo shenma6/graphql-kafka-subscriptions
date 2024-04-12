@@ -7,7 +7,7 @@ let pubsub: KafkaPubSub
 beforeAll(() => {
   jest.setTimeout(60000);
   pubsub = new KafkaPubSub({
-    topic: process.env.KAFKA_TOPIC || 'test',
+    topics: process.env.KAFKA_TOPIC.split(',') || ['test', 'test1'],
     host: process.env.KAFKA_HOST || 'localhost',
     port: process.env.KAFKA_PORT || '9092',
     logger: Logger.createLogger({
